@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: turon-tz
+    runtime: node
+    plan: free
+    buildCommand: npm install --ignore-scripts
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 22
+      - key: AI_PROVIDER
+        value: offline
+      - key: SUPABASE_STATE_TABLE
+        value: turon_tz_state
+      - key: SUPABASE_STORAGE_BUCKET
+        value: turon-tz-files
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

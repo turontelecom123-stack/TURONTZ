@@ -1,0 +1,11 @@
+node_modules/
+.env
+ai_key.txt
+db.json
+uploads/
+npm-debug.log*
+backups/
+db.broken-*.json
+db.json.tmp
+db.before-*.json
+telegram.json
