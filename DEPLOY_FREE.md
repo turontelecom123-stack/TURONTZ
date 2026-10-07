@@ -34,7 +34,7 @@ Bu papkani GitHub’dagi private repository’ga yuklang. `.gitignore` sababli `
    ```
 
 4. Deploy tugagach `https://…onrender.com/api/health` manzilini oching. Javobda `"persistence":"supabase"` va `"storage":"supabase"` bo‘lishi kerak.
-5. O‘sha domenni komanda bilan ulashing. Birinchi SMM akkauntini ro‘yxatdan o‘tkazing, so‘ng **Управление** ekranidan qolganlarni yarating.
+5. O‘sha domenni komanda bilan ulashing. Birinchi SMM akkauntini ro‘yxatdan o‘tkazing, so‘ng **Команда** ekranidan qolganlarni yarating.
 
 ## 4. Lokal bepul AI’ni yoqish
 
@@ -43,6 +43,9 @@ Lokal kompyuterda Profile → **Бесплатный локальный AI** →
 Internetdagi Render nusxasida lokal Ollama’ga kira olmaydi. Unda ichki analyzer ishlaydi. Cloud AI kerak bo‘lsa, keyin serverga rasmiy AI-provider kaliti qo‘shiladi — kalit hech qachon frontendga berilmaydi.
 
 ## Muhim cheklovlar
+
+- Render’da `TRUST_PROXY=1` qo‘yilgan (render.yaml’da bor): busiz login urinishlari cheklovi hammaga bitta IP bo‘yicha ishlaydi.
+- Supabase Storage rejimida bitta fayl hajmi bucket limitidan oshmaydi (migratsiyada 8 MB). Kattaroq video kerak bo‘lsa, Supabase’da bucket limitini oshiring va `SUPABASE_MAX_FILE_MB` ni shunga moslang.
 
 - Bepul tariflar vaqt o‘tishi bilan o‘zgarishi mumkin; deploydan oldin Render va Supabase limitlarini ularning rasmiy pricing sahifasida tekshiring.
 - `service_role` kaliti faqat serverda bo‘lishi shart.

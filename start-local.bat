@@ -8,7 +8,7 @@ if exist "%ProgramFiles%\nodejs\node.exe" set "NODE_EXE=%ProgramFiles%\nodejs\no
 if not "%NODE_EXE%"=="node" goto run
 if exist "%LocalAppData%\Programs\nodejs\node.exe" set "NODE_EXE=%LocalAppData%\Programs\nodejs\node.exe"
 if not "%NODE_EXE%"=="node" goto run
-echo Node.js ne nayden. Skachayte s https://nodejs.org i ustanovite, potom zapustite start.bat.
+echo Node.js ne nayden. Skachayte s https://nodejs.org i ustanovite, potom zapustite start-local.bat.
 start "" https://nodejs.org
 pause
 goto :eof

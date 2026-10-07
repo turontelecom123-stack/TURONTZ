@@ -11,6 +11,8 @@ services:
         value: 22
       - key: AI_PROVIDER
         value: offline
+      - key: TRUST_PROXY
+        value: "1"
       - key: SUPABASE_STATE_TABLE
         value: turon_tz_state
       - key: SUPABASE_STORAGE_BUCKET

@@ -9,3 +9,4 @@ db.broken-*.json
 db.json.tmp
 db.before-*.json
 telegram.json
+.claude/settings.local.json
