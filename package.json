@@ -1,6 +1,6 @@
 {
   "name": "turon-tz",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Turon TZ — AI-assisted SMM task workspace",
   "engines": {
@@ -8,6 +8,7 @@
   },
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check app.js"
+    "test": "node --test test/*.test.js",
+    "check": "node --check server.js && node --check app.js && node --check parser_engine.js && node --check sw.js && node --check lib/files.js && node --check lib/schedule.js && node --check lib/report.js"
   }
 }
