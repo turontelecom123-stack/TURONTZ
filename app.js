@@ -51,13 +51,14 @@ let calMode = 'deadline';
 let composing = { text: '', refUrl: '', parsed: null, files: [] };
 let adminSummary = null, adminLoading = false;
 let tgStatus = {}, seenNotifications = null;
+let uploading = 0, adminReport = null, reportPeriod = 'month', recurringRules = null;
 
 function setToken(t) { token = t || ''; t ? localStorage.setItem('turontz_token', t) : localStorage.removeItem('turontz_token'); }
 function toast(msg, ms = 2600) { const t = $('#toast'); t.textContent = msg; t.hidden = false; clearTimeout(t._h); t._h = setTimeout(() => t.hidden = true, ms); }
 async function api(path, method='GET', body) {
   let res;
   try { res = await fetch(path, { method, headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) }, body: body ? JSON.stringify(body) : undefined }); }
-  catch(e) { throw new Error('Server ishlamayapti. start.bat ni oching.'); }
+  catch(e) { throw new Error('Нет связи с сервером. Проверьте интернет и попробуйте ещё раз.'); }
   let data = {}; try { data = await res.json(); } catch(e) {}
   if (res.status === 401 && token) { setToken(''); me = null; renderAuth(); throw new Error(data.error || 'Sessiya tugadi'); }
   if (!res.ok) throw new Error(data.error || 'Xatolik ' + res.status);
@@ -164,7 +165,7 @@ function renderAuth() {
       ${reg?`<label>Имя и фамилия<input id="a-name" placeholder="Азиз Каримов"></label>
       <label>Роль<select id="a-role"><option value="smm">SMM — ставит задачи</option><option value="video">Видеограф</option><option value="edit">Монтажёр</option><option value="design">Дизайнер</option></select></label>`:''}
       <label>Логин<input id="a-login" autocapitalize="none" placeholder="aziz"></label>
-      <label>Пароль<input id="a-pass" type="password" placeholder="••••"></label>
+      <label>Пароль<input id="a-pass" type="password" placeholder="${reg ? 'минимум 6 символов' : '••••••'}" autocomplete="${reg ? 'new-password' : 'current-password'}"></label>
     </div>
     <button class="btn primary" id="auth-go">${reg?'Создать аккаунт':'Войти'}</button>
     <small>${reg?"Har bir ijrochi o'z roli bilan kiradi.":"Birinchi marta kirsangiz — регистрация."}</small>
@@ -176,7 +177,7 @@ function renderAuth() {
       const login = $('#a-login').value.trim(); const password = $('#a-pass').value;
       const data = reg ? await api('/api/register','POST',{ name: $('#a-name').value, role: $('#a-role').value, login, password }) : await api('/api/login','POST',{ login, password });
       if (data.pending) { authMode = 'login'; renderAuth(); toast(data.message, 7000); return; }
-      setToken(data.token); me = await api('/api/me'); await refresh(); document.body.className = ''; page = isSmm() ? 'dashboard' : 'board'; localStorage.setItem('turontz_page', page); openTaskFromLink(); render(); toast('Добро пожаловать, ' + me.name.split(' ')[0]);
+      setToken(data.token); me = await api('/api/me'); await refresh(); document.body.className = ''; page = isSmm() ? 'dashboard' : 'board'; localStorage.setItem('turontz_page', page); openTaskFromLink(); render(); toast('Добро пожаловать, ' + me.name.split(' ')[0]); askNewPassword();
     } catch(e) { toast(e.message); }
   };
   $('#auth-go').onclick = submit; $('#a-pass').onkeydown = e => { if (e.key === 'Enter') submit(); };
@@ -318,7 +319,23 @@ async function parseTZ() {
   try { composing.parsed = await api('/api/ai/parse','POST',{ text: composing.text, refUrl: composing.refUrl, source: composing.voice ? 'voice' : 'text', defaultProjectId: filters.project !== 'all' ? filters.project : '' }); render(); if (composing.parsed.aiAvailable) enrichParsed(composing.parsed, composing.text); }
   catch(e) { toast(e.message); btn.disabled = false; btn.innerHTML = svg('spark',18) + ' Разобрать ТЗ'; }
 }
-async function fileToDataUrl(file) { return await new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(fr.result); fr.onerror = rej; fr.readAsDataURL(file); }); }
+// Files go to the server as they are (no base64), so large videos work and progress can be shown.
+function uploadFile(taskId, file, kind, onProgress) {
+  uploading++;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/tasks/${encodeURIComponent(taskId)}/upload?name=${encodeURIComponent(file.name)}&kind=${kind === 'reference' ? 'reference' : 'work'}`);
+    xhr.setRequestHeader('authorization', 'Bearer ' + token);
+    xhr.upload.onprogress = e => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    xhr.onload = () => {
+      let data = {}; try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new Error(data.error || (xhr.status === 413 ? 'Файл слишком большой' : 'Ошибка загрузки ' + xhr.status)));
+    };
+    xhr.onerror = () => reject(new Error('Загрузка прервалась — проверьте интернет и попробуйте ещё раз'));
+    xhr.send(file);
+  }).finally(() => { uploading--; });
+}
 async function createTaskFromPreview() {
   const roles = $$('.role-pick .chip.on').map(b => b.dataset.role);
   const p = composing.parsed;
@@ -330,7 +347,10 @@ async function createTaskFromPreview() {
   const btn = $('#create-task'); btn.disabled = true; btn.innerHTML = '<span class="spin"></span> Создаём…';
   try {
     const task = await api('/api/tasks','POST', body);
-    for (const f of composing.files) await api('/api/tasks/' + task.id + '/files','POST',{ name: f.name, type: f.type, dataUrl: await fileToDataUrl(f), kind:'reference' });
+    const files = composing.files;
+    try {
+      for (const [i, f] of files.entries()) await uploadFile(task.id, f, 'reference', part => { btn.innerHTML = `<span class="spin"></span> Файл ${i + 1}/${files.length} · ${Math.round(part * 100)}%`; });
+    } catch (e) { toast('ТЗ отправлено, но файл не загрузился: ' + e.message, 6000); }
     composing = { text:'', refUrl:'', parsed:null, files:[] };
     await refresh(); if (filters.project !== 'all' && filters.project !== task.projectId) setProject(task.projectId); page = 'board'; detailId = task.id; render(); toast('ТЗ отправлено исполнителям ✓');
   } catch(e) { toast(e.message); btn.disabled = false; }
@@ -404,7 +424,7 @@ function renderBoard() {
   const manager = isSmm();
   const list = filteredTasks();
   const groups = [
-    ['intake', 'Новые', ['new','clarify'], 'Новых ТЗ нет'],
+    ['intake', 'Новые', manager ? ['draft','new','clarify'] : ['new','clarify'], 'Новых ТЗ нет'],
     ['production', 'В работе', ['work','waiting','revision'], 'Сейчас ничего не в работе'],
     ['review', 'На проверке', ['submitted'], 'Нечего проверять'],
     ['delivered', 'Готово', ['approved','published'], 'Пока ничего не сдано']
@@ -433,29 +453,28 @@ function bindBoard() {
   $$('[data-open]').forEach(c => c.onclick = () => { detailId = c.dataset.open; render(); });
 }
 
-function fileHref(f) {
-  const url = String(f.url || '');
-  if (!url.startsWith('/api/files/')) return url;
-  return url + (url.includes('?') ? '&' : '?') + 'access_token=' + encodeURIComponent(token);
-}
+function fileHref(f) { return String(f.href || ''); }
+function fileSize(n) { n = n || 0; return n >= 1048576 ? (n / 1048576).toFixed(1).replace(/\.0$/, '') + ' МБ' : Math.max(1, Math.round(n / 1024)) + ' КБ'; }
+const isWebLink = url => /^https?:\/\//i.test(String(url || ''));
 function renderFileItem(f, canApprove) {
   const col = f.status === 'approved' ? 'green' : (f.status === 'revision' ? 'orange' : 'blue');
   const lbl = f.status === 'approved' ? '✓ Утверждён' : (f.status === 'revision' ? 'Правки' : 'На проверке');
   const ver = f.version ? 'v' + f.version : '';
   const href = fileHref(f);
-  const isImage = String(f.type || '').startsWith('image/');
-  const isVideo = String(f.type || '').startsWith('video/');
-  const preview = isImage ? `<a class="media-preview image-preview" href="${esc(href)}" target="_blank" rel="noreferrer"><img src="${esc(href)}" alt="${esc(f.name)}"></a>` : (isVideo ? `<video class="media-preview video-preview" controls preload="metadata" src="${esc(href)}"></video>` : '');
+  const preview = f.preview === 'image' ? `<a class="media-preview image-preview" href="${esc(href)}" target="_blank" rel="noreferrer"><img src="${esc(href)}" alt="${esc(f.name)}" loading="lazy"></a>`
+    : f.preview === 'video' ? `<video class="media-preview video-preview" controls preload="metadata" playsinline src="${esc(href)}"></video>`
+    : f.preview === 'audio' ? `<audio class="media-preview" controls preload="none" src="${esc(href)}"></audio>` : '';
   const kind = f.kind === 'reference' ? '<span class="badge badge-neutral">Референс</span>' : '';
   const stateBadge = f.kind === 'reference' ? '' : '<span class="badge badge-' + col + '">' + lbl + '</span>';
   let h = '<div class="file-item">' + preview + '<div class="file-header"><a href="' + esc(href) + '" target="_blank" rel="noreferrer">' + svg('file', 15) + '<span>' + esc(f.name) + '</span><small>' + ver + '</small></a>' + kind + stateBadge + '</div>';
-  h += '<div class="file-meta"><small>' + Math.round((f.size || 0) / 1024) + ' KB · ' + esc(userById(f.uploadedBy).name) + '</small></div>';
+  h += '<div class="file-meta"><small>' + fileSize(f.size) + ' · ' + esc(userById(f.uploadedBy).name) + '</small></div>';
   if (canApprove && f.kind !== 'reference') h += '<div class="file-actions"><button class="btn light small" data-approve="' + f.id + '">✓ Утвердить</button><button class="btn light small" data-revision="' + f.id + '">✎ На доработку</button><button class="btn light small danger" data-delfile="' + f.id + '">✕</button></div>';
   h += '</div>';
   return h;
 }
 function quickActions(t) {
   if (isSmm()) {
+    if (t.status === 'draft') return `<div class="quick-actions"><button class="qa-btn ok" data-quick="new">${svg('send',16)} Отправить исполнителям</button></div>`;
     if (t.status === 'submitted') return `<div class="quick-actions"><button class="qa-btn ok" data-quick="approved">${svg('check',17)} Принять работу</button><button class="qa-btn warn" data-quick="revision">${svg('edit',16)} Вернуть на правки</button></div>`;
     if (t.status === 'approved') return `<div class="quick-actions"><button class="qa-btn ok" data-quick="published">${svg('rocket',17)} Опубликовано</button></div>`;
     return '';
@@ -479,15 +498,15 @@ function renderTaskDrawer(id) {
     ${myRole && ROLE_HINT[myRole] && ['new','clarify','work','waiting','revision'].includes(t.status)?`<div class="role-hint"><b>${svg(myRole==='design'?'edit':(myRole==='video'?'mic':'board'),15)} Вам как ${ROLES[myRole].toLowerCase()}у:</b> ${ROLE_HINT[myRole]}</div>`:''}
     <div class="meta-grid"><div><span>Проект</span><b>${esc(p.name)}</b></div><div><span>Дедлайн</span><b class="${dl.cls}">${dl.text}</b></div><div><span>Формат</span><b>${esc(t.format)}</b></div><div><span>Автор</span><b>${esc(creator.name)}</b></div></div>
     ${isSmm() ? `<label class="status-row">Статус<select id="task-status">${Object.entries(STATUS).map(([k,v])=>`<option value="${k}" ${t.status===k?'selected':''}>${v}</option>`).join('')}</select></label>` : `<div class="status-row">Статус <span>${statusPill(t.status)}</span><small>Изменяйте его кнопками выше.</small></div>`}
-    ${isSmm()?`<button class="btn light" id="edit-task">${svg('edit',16)} Редактировать</button>`:''}
+    ${isSmm()?`<div class="drawer-tools"><button class="btn light" id="edit-task">${svg('edit',16)} Редактировать</button><button class="btn light" id="repeat-task">${svg('refresh',16)} Повторять</button></div>`:''}
     ${t.brandContext?`<section class="brand-context"><h3>Правила бренда</h3><p>${esc(t.brandContext)}</p></section>`:''}
     <section><h3>Задача</h3><p class="desc">${esc(t.description)}</p>${t.bullets?.length?`<ul class="bullets">${t.bullets.map(b=>`<li>${esc(b)}</li>`).join('')}</ul>`:''}</section>
     ${t.missing?.length?`<section class="warn-box"><b>AI уточнения</b>${t.missing.map(x=>`<p>${esc(x)}</p>`).join('')}</section>`:''}
     <section><h3>Checklist</h3><div class="check-list">${(t.checklist||[]).map(ch=>`<label><input type="checkbox" data-check="${ch.id}" ${ch.done?'checked':''}> <span>${esc(ch.text)}</span></label>`).join('') || '<p class="muted">Чек-лист пуст</p>'}</div></section>
-    ${t.refs?.length?`<section><h3>Референсы</h3><div class="ref-list">${t.refs.map(r=>`<a href="${esc(r.url)}" target="_blank">${svg('link',14)} ${esc(r.url)}<small>${esc(r.note||'')}</small></a>`).join('')}</div></section>`:''}
+    ${t.refs?.length?`<section><h3>Референсы</h3><div class="ref-list">${t.refs.map(r=>isWebLink(r.url)?`<a href="${esc(r.url)}" target="_blank" rel="noreferrer noopener">${svg('link',14)} ${esc(r.url)}<small>${esc(r.note||'')}</small></a>`:`<span>${esc(r.url)}<small>${esc(r.note||'')}</small></span>`).join('')}</div></section>`:''}
     ${t.ideas?.length?`<section class="ai-card"><b>${svg('spark',16)} Идеи от AI</b>${t.ideas.map((x,i)=>`<p><em>${i+1}</em>${esc(x)}</p>`).join('')}</section>`:''}
     ${(t.hook||t.cta)?`<section><h3>Хук и CTA</h3>${t.hook?`<p class="hint-box"><b>Начало:</b> ${esc(t.hook)}</p>`:''}${t.cta?`<p class="hint-box"><b>Призыв:</b> ${esc(t.cta)}</p>`:''}</section>`:''}
-    <section><h3>Файлы / версии</h3><div class="files">${(t.files||[]).map(f=>renderFileItem(f,isSmm())).join('') || '<p class="muted">Файлов нет</p>'}</div><div class="upload-inline"><input id="drawer-file" type="file"><button class="btn light" id="upload-file">${svg('upload',15)} Загрузить</button></div></section>
+    <section><h3>Файлы / версии</h3><div class="files">${(t.files||[]).map(f=>renderFileItem(f,isSmm())).join('') || '<p class="muted">Файлов нет</p>'}</div><div class="upload-inline"><input id="drawer-file" type="file" multiple><button class="btn light" id="upload-file">${svg('upload',15)} Загрузить</button></div></section>
     <section class="chat-box"><h3>${svg('chat',16)} Вопросы / комментарии</h3><div class="messages">${(t.chat||[]).map(msgHtml).join('') || '<p class="muted">Вопросов нет</p>'}</div><div class="chat-input"><input id="chat-text" placeholder="Вопрос или комментарий…"><button id="chat-send">${svg('send',16)}</button></div></section>
     <section><h3>Activity</h3><div class="activity">${(t.activity||[]).slice().reverse().slice(0,8).map(a=>`<p><b>${esc(userById(a.userId).name || a.userId)}</b> ${esc(a.action)} <small>${fmtDateFull(a.at)}</small><br><span>${esc(a.detail||'')}</span></p>`).join('')}</div></section>
     ${isSmm()?`<button class="btn danger" id="delete-task">${svg('trash',16)} Удалить задачу</button>`:''}
@@ -508,9 +527,18 @@ function bindTaskDrawer(id) {
   $$('[data-revision]').forEach(b => b.onclick = () => { const fid = b.dataset.revision; modal(`<h2>Что поправить?</h2><textarea id="rev-note" placeholder="Например: сделать заголовок крупнее, поменять музыку…" style="width:100%;min-height:110px;border:1px solid var(--line);border-radius:12px;padding:11px;font-family:inherit;font-size:15px"></textarea><button class="btn primary" id="rev-send">Отправить на доработку</button>`); setTimeout(()=>{ const s=$('#rev-send'); if(s) s.onclick = async () => { try { await api('/api/tasks/'+id+'/files','PATCH',{ fileId: fid, action:'revision', note: $('#rev-note').value }); closeModal(); await refresh(); render(); toast('Отправлено на доработку'); } catch(e){ toast(e.message); } }; },0); });
   $$('[data-delfile]').forEach(b => b.onclick = async () => { if (b.dataset.ok !== '1') { b.dataset.ok='1'; b.textContent='Удалить?'; return; } try { await api('/api/tasks/'+id+'/files','PATCH',{ fileId: b.dataset.delfile, action:'delete' }); await refresh(); render(); toast('Файл удалён'); } catch(e){ toast(e.message); } });
   const ed = $('#edit-task'); if (ed) ed.onclick = () => openEditTask(id);
+  const rp = $('#repeat-task'); if (rp) rp.onclick = () => openRecurringModal(id);
 }
 async function sendChat(id) { const inp=$('#chat-text'), text=inp.value.trim(); if(!text) return; try { await api('/api/tasks/'+id+'/chat','POST',{text}); await refresh(); render(); } catch(e){toast(e.message);} }
-async function uploadDrawerFile(id) { const f = $('#drawer-file').files[0]; if(!f) return toast('Выберите файл'); try { await api('/api/tasks/'+id+'/files','POST',{ name:f.name, type:f.type, dataUrl: await fileToDataUrl(f) }); await refresh(); render(); toast('Файл загружен'); } catch(e){ toast(e.message); } }
+async function uploadDrawerFile(id) {
+  const files = [...($('#drawer-file').files || [])];
+  if (!files.length) return toast('Выберите файл');
+  const btn = $('#upload-file'); btn.disabled = true;
+  try {
+    for (const [i, f] of files.entries()) await uploadFile(id, f, 'work', part => { const b = $('#upload-file'); if (b) b.innerHTML = `<span class="spin"></span> ${files.length > 1 ? (i + 1) + '/' + files.length + ' · ' : ''}${Math.round(part * 100)}%`; });
+    await refresh(); render(); toast(files.length > 1 ? 'Файлы загружены' : 'Файл загружен');
+  } catch (e) { toast(e.message, 6000); const b = $('#upload-file'); if (b) { b.disabled = false; b.innerHTML = svg('upload',15) + ' Загрузить'; } }
+}
 function openEditTask(id) {
   const t = tasks.find(x=>x.id===id); if (!t) return;
   const selectable = users.filter(u => u.active !== false && ['video','edit','design'].includes(u.role));
@@ -563,7 +591,7 @@ function renderAdmin() {
   if (!isSmm()) return '<div class="empty-big">Раздел доступен только SMM-менеджеру.</div>';
   if (!adminSummary) return `<section class="page-head"><div><h1>Команда</h1><p>Люди, нагрузка и просрочки.</p></div></section><div class="empty-big"><span class="spin dark"></span><p>Загружаем…</p></div>`;
   const s = adminSummary;
-  return `<section class="page-head"><div><h1>Команда</h1><p>Люди, нагрузка и просрочки.</p></div><div class="head-actions"><button class="btn light" data-nav="projects">${svg('project',16)} Проекты и бренды</button><button class="btn primary" id="add-member">${svg('plus',16)} Добавить человека</button></div></section><section class="admin-grid"><article class="panel admin-panel"><div class="panel-title-row"><h3>Команда · ${s.totals.users}</h3></div><div class="admin-team-list">${s.workload.map(w=>{ const u=w.user; const self=u.id===me.id; return `<div class="admin-team-row ${u.active?'':'inactive'}"><span class="avatar role-${u.role}">${initials(u.name)}</span><div class="team-person"><b>${esc(u.name)}${u.telegramLinked ? ' <span class="tg-badge" title="Получает уведомления в Telegram">TG</span>' : ''}</b><small>${u.pending ? '<span class="warn-txt">ждёт подтверждения</span> · ' : ''}@${esc(u.login)} · ${w.active} активных · ${w.overdue ? '<span class="danger-txt">'+w.overdue+' просрочено</span>' : 'без просрочек'}</small></div><select data-user-role="${u.id}" ${self?'disabled':''}>${Object.entries(ROLES).map(([r,label])=>`<option value="${r}" ${u.role===r?'selected':''}>${label}</option>`).join('')}</select><button class="btn light small" data-user-toggle="${u.id}" ${self?'disabled':''}>${u.pending ? 'Подтвердить' : (u.active ? 'Отключить' : 'Включить')}</button></div>`; }).join('') || '<p class="muted">Команда пока пуста.</p>'}</div></article><article class="panel admin-panel"><h3>Нагрузка по людям</h3><div class="workload-list">${s.workload.filter(w=>['video','edit','design'].includes(w.user.role)).map(w=>`<div><span><b>${esc(w.user.name)}</b><small>${ROLES[w.user.role]}</small></span><b class="load-count ${w.overdue?'danger-txt':''}">${w.active}</b></div>`).join('') || '<p class="muted">Добавьте исполнителей, чтобы увидеть нагрузку.</p>'}</div></article><article class="panel admin-panel"><h3>Просроченные задачи</h3><div class="late-list">${s.lateTasks.map(t=>`<button data-admin-open="${t.id}"><b>${esc(t.title)}</b><span>${esc(projectById(t.projectId).name)} · ${fmtDateFull(t.deadline)}</span></button>`).join('') || '<p class="muted">Просрочек нет ✓</p>'}</div></article>${telegramAdminHtml()}</section>`;
+  return `<section class="page-head"><div><h1>Команда</h1><p>Люди, нагрузка и просрочки.</p></div><div class="head-actions"><button class="btn light" data-nav="projects">${svg('project',16)} Проекты и бренды</button><button class="btn primary" id="add-member">${svg('plus',16)} Добавить человека</button></div></section><section class="admin-grid"><article class="panel admin-panel"><div class="panel-title-row"><h3>Команда · ${s.totals.users}</h3></div><div class="admin-team-list">${s.workload.map(w=>{ const u=w.user; const self=u.id===me.id; return `<div class="admin-team-row ${u.active?'':'inactive'}"><span class="avatar role-${u.role}">${initials(u.name)}</span><div class="team-person"><b>${esc(u.name)}${u.telegramLinked ? ' <span class="tg-badge" title="Получает уведомления в Telegram">TG</span>' : ''}</b><small>${u.pending ? '<span class="warn-txt">ждёт подтверждения</span> · ' : ''}@${esc(u.login)} · ${w.active} активных · ${w.overdue ? '<span class="danger-txt">'+w.overdue+' просрочено</span>' : 'без просрочек'}</small></div><select data-user-role="${u.id}" ${self?'disabled':''}>${Object.entries(ROLES).map(([r,label])=>`<option value="${r}" ${u.role===r?'selected':''}>${label}</option>`).join('')}</select><div class="team-actions"><button class="btn light small" data-user-toggle="${u.id}" ${self?'disabled':''}>${u.pending ? 'Подтвердить' : (u.active ? 'Отключить' : 'Включить')}</button>${self ? '' : `<button class="btn light small" data-user-reset="${u.id}" title="Задать временный пароль">Пароль</button>`}</div></div>`; }).join('') || '<p class="muted">Команда пока пуста.</p>'}</div></article><article class="panel admin-panel"><h3>Нагрузка по людям</h3><div class="workload-list">${s.workload.filter(w=>['video','edit','design'].includes(w.user.role)).map(w=>`<div><span><b>${esc(w.user.name)}</b><small>${ROLES[w.user.role]}</small></span><b class="load-count ${w.overdue?'danger-txt':''}">${w.active}</b></div>`).join('') || '<p class="muted">Добавьте исполнителей, чтобы увидеть нагрузку.</p>'}</div></article><article class="panel admin-panel"><h3>Просроченные задачи</h3><div class="late-list">${s.lateTasks.map(t=>`<button data-admin-open="${t.id}"><b>${esc(t.title)}</b><span>${esc(projectById(t.projectId).name)} · ${fmtDateFull(t.deadline)}</span></button>`).join('') || '<p class="muted">Просрочек нет ✓</p>'}</div></article>${telegramAdminHtml()}${reportHtml()}${recurringHtml()}</section>`;
 }
 function bindAdmin() {
   if (!adminSummary && !adminLoading) { loadAdmin(); return; }
@@ -583,16 +611,18 @@ function bindAdmin() {
   $$('[data-user-role]').forEach(select => select.onchange = async () => { try { await api('/api/admin/users/'+select.dataset.userRole, 'PATCH', { role:select.value }); await refresh(); await loadAdmin(true); toast('Роль обновлена'); } catch(e) { toast(e.message); } });
   $$('[data-user-toggle]').forEach(button => button.onclick = async () => { const member=users.find(u=>u.id===button.dataset.userToggle); if (!member) return; try { await api('/api/admin/users/'+member.id, 'PATCH', { active:!member.active }); await refresh(); await loadAdmin(true); toast(member.active ? 'Доступ отключён' : 'Доступ включён'); } catch(e) { toast(e.message); } });
   $$('[data-admin-open]').forEach(button => button.onclick = () => { detailId=button.dataset.adminOpen; render(); });
+  $$('[data-user-reset]').forEach(button => button.onclick = () => openResetPasswordModal(button.dataset.userReset));
+  bindReport(); bindRecurring();
 }
 async function loadAdmin(force = false) {
   if (adminLoading) return;
   adminLoading = true;
-  try { adminSummary = await api('/api/admin/summary'); }
+  try { [adminSummary, recurringRules] = await Promise.all([api('/api/admin/summary'), api('/api/recurring')]); loadReport(); }
   catch(e) { toast(e.message); }
   finally { adminLoading = false; if (page === 'admin') render(); }
 }
 function openAddMemberModal() {
-  modal(`<h2>Добавить человека</h2><p class="muted">Передайте сотруднику этот логин и временный пароль. Он сможет войти сразу.</p><div class="form-grid"><label>Имя<input id="member-name" placeholder="Алия Каримова"></label><label>Роль<select id="member-role">${Object.entries(ROLES).map(([r,label])=>`<option value="${r}" ${r==='design'?'selected':''}>${label}</option>`).join('')}</select></label><label>Логин<input id="member-login" autocapitalize="none" placeholder="aliya"></label><label>Временный пароль<input id="member-password" type="password" placeholder="минимум 4 символа"></label></div><button class="btn primary" id="save-member">Добавить в команду</button>`);
+  modal(`<h2>Добавить человека</h2><p class="muted">Передайте сотруднику этот логин и временный пароль. При первом входе он задаст свой пароль.</p><div class="form-grid"><label>Имя<input id="member-name" placeholder="Алия Каримова"></label><label>Роль<select id="member-role">${Object.entries(ROLES).map(([r,label])=>`<option value="${r}" ${r==='design'?'selected':''}>${label}</option>`).join('')}</select></label><label>Логин<input id="member-login" autocapitalize="none" placeholder="aliya"></label><label>Временный пароль<input id="member-password" type="text" autocomplete="off" placeholder="минимум 6 символов"></label></div><button class="btn primary" id="save-member">Добавить в команду</button>`);
   $('#save-member').onclick = async () => { try { await api('/api/admin/users','POST',{ name:$('#member-name').value, role:$('#member-role').value, login:$('#member-login').value, password:$('#member-password').value }); closeModal(); await refresh(); await loadAdmin(true); toast('Человек добавлен в команду'); } catch(e) { toast(e.message); } };
 }
 
@@ -607,13 +637,14 @@ function renderCalendar() {
   const upcoming = scope.filter(t=>t[dateField] && new Date(t[dateField]) >= new Date(new Date().toDateString())).sort((a,b)=>new Date(a[dateField])-new Date(b[dateField])).slice(0,8);
   const title = isPublish ? 'Календарь публикаций' : 'Календарь дедлайнов';
   const subtitle = (cp ? cp.name + ' · ' : '') + (isPublish ? 'Когда выходит контент' : 'Когда сдавать работы');
-  return `<div class="project-chips">${projectSwitcher('project-chip')}</div><section class="page-head"><div><h1>${title}</h1><p>${subtitle}</p></div><div class="cal-nav"><button id="prev-month">‹</button><b>${esc(month)}</b><button id="next-month">›</button><div style="display:flex;gap:8px;margin-left:16px"><button class="btn light" id="cal-deadline" style="${!isPublish?'background:var(--acc);color:#fff;':''}">Дедлайны</button><button class="btn light" id="cal-publish" style="${isPublish?'background:var(--acc);color:#fff;':''}">Публикация</button></div></div></section><section class="calendar-layout"><div class="panel month"><div class="week-head">${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(x=>`<span>${x}</span>`).join('')}</div><div class="month-grid">${cells}</div></div><aside class="panel nearest"><h3>${isPublish?'Ближайшие публикации':'Ближайшие дедлайны'}</h3>${upcoming.map(t=>{const info=isPublish?{text:t.publishDate?fmtDateFull(t.publishDate):'-',cls:'muted'}:deadlineInfo(t.deadline,t.status);return `<button data-open="${t.id}"><span>${esc(t.title)}</span><b class="${info.cls}">${info.text}</b></button>`}).join('') || '<p class="muted">Дат нет</p>'}</aside></section>`;
+  return `<div class="project-chips">${projectSwitcher('project-chip')}</div><section class="page-head"><div><h1>${title}</h1><p>${subtitle}</p></div><div class="cal-nav"><button id="prev-month">‹</button><b>${esc(month)}</b><button id="next-month">›</button><div style="display:flex;gap:8px;margin-left:16px"><button class="btn light" id="cal-deadline" style="${!isPublish?'background:var(--acc);color:#fff;':''}">Дедлайны</button><button class="btn light" id="cal-publish" style="${isPublish?'background:var(--acc);color:#fff;':''}">Публикация</button><button class="btn light" id="cal-export">${svg('download',15)} Контент-план</button></div></div></section><section class="calendar-layout"><div class="panel month"><div class="week-head">${['Пн','Вт','Ср','Чт','Пт','Сб','Вс'].map(x=>`<span>${x}</span>`).join('')}</div><div class="month-grid">${cells}</div></div><aside class="panel nearest"><h3>${isPublish?'Ближайшие публикации':'Ближайшие дедлайны'}</h3>${upcoming.map(t=>{const info=isPublish?{text:t.publishDate?fmtDateFull(t.publishDate):'-',cls:'muted'}:deadlineInfo(t.deadline,t.status);return `<button data-open="${t.id}"><span>${esc(t.title)}</span><b class="${info.cls}">${info.text}</b></button>`}).join('') || '<p class="muted">Дат нет</p>'}</aside></section>`;
 }
 function bindCalendar() {
   $('#prev-month').onclick=()=>{calCursor.setMonth(calCursor.getMonth()-1);render()};
   $('#next-month').onclick=()=>{calCursor.setMonth(calCursor.getMonth()+1);render()};
   $('#cal-deadline').onclick=()=>{calMode='deadline';render()};
   $('#cal-publish').onclick=()=>{calMode='publish';render()};
+  $('#cal-export').onclick=openPlanExport;
   $$('[data-open]').forEach(b=>b.onclick=()=>{detailId=b.dataset.open;render()});
 }
 
@@ -628,7 +659,7 @@ function telegramCardHtml() {
   if (!s.configured) body = isSmm()
     ? `<p class="muted">Бот ещё не подключён. Это делается один раз в разделе «Команда».</p><button class="btn light" data-nav="admin">Перейти в «Команду»</button>`
     : '<p class="muted">SMM-менеджер ещё не подключил Telegram-бота.</p>';
-  else if (s.linked) body = `<p class="tg-ok">✓ Уведомления приходят в Telegram${s.linkedAs ? ' · ' + esc(s.linkedAs) : ''}</p><button class="btn light" id="tg-unlink">Отключить</button>`;
+  else if (s.linked) body = `<p class="tg-ok">✓ Уведомления приходят в Telegram${s.linkedAs ? ' · ' + esc(s.linkedAs) : ''}</p>${isSmm() ? `<p class="muted">Можно ставить задачи прямо из Telegram: отправьте боту @${esc(s.botUsername)} текст ТЗ — он покажет черновик и спросит, отправлять ли исполнителям.</p><label class="switch-row"><input type="checkbox" id="tg-backup" ${me.backupToTelegram ? 'checked' : ''}> <span>Каждый вечер присылать мне резервную копию базы</span></label><button class="btn light small" id="tg-backup-now">${svg('download',14)} Прислать копию сейчас</button>` : ''}<button class="btn light" id="tg-unlink">Отключить</button>`;
   else body = `<p class="muted">Новые ТЗ, комментарии и правки будут приходить на телефон от бота @${esc(s.botUsername)}.</p><button class="btn primary" id="tg-link">${svg('send',16)} Подключить Telegram</button><p class="muted tg-hint" id="tg-hint" hidden>Откроется Telegram — нажмите <b>Start</b> (Запустить), затем вернитесь сюда.</p>`;
   return `<div class="panel tg-card"><h3>Уведомления в Telegram</h3>${body}</div>`;
 }
@@ -646,7 +677,7 @@ function renderProfile() {
     : !ollama.modelReady
       ? `<div class="ai-setup-copy"><b>Ollama найден, но модель не скачана</b><p>Нужна модель <code>${esc(ollama.model)}</code>. Она останется на этом компьютере и не требует API-ключа.</p>${isSmm()?`<button class="btn primary" id="pull-ollama">${svg('download',16)} Скачать бесплатную модель</button>`:'<p class="muted">Попросите SMM-менеджера скачать модель один раз.</p>'}</div>`
       : `<div class="ai-setup-copy"><b>Локальный AI готов</b><p>Модель <code>${esc(ollama.model)}</code> работает на этом компьютере. Если Claude-ключ не добавлен, она используется автоматически.</p></div>`;
-  return `<section class="page-head"><div><h1>Профиль</h1><p>Ваше имя и выход из аккаунта.</p></div></section><section class="profile-grid"><div class="panel profile-card"><div class="avatar big role-${me.role}">${initials(me.name)}</div><h2>${esc(me.name)}</h2><p>${ROLES[me.role]}</p><label>Имя<input id="profile-name" value="${esc(me.name)}"></label><button class="btn light" id="save-profile">Сохранить имя</button><button class="btn danger" id="logout">${svg('logout',16)} Выйти</button></div>${isSmm() ? '' : `<div class="panel"><h3>Команда</h3><div class="team-list">${users.map(u=>`<div><span class="avatar role-${u.role}">${initials(u.name)}</span><b>${esc(u.name)}</b><em>${ROLES[u.role]}</em></div>`).join('')}</div></div>`}${telegramCardHtml()}${isSmm() ? `<div class="panel ai-control-card"><div class="panel-title-row"><h3>AI-разбор ТЗ</h3><button class="icon-action" id="refresh-ai" title="Проверить состояние">${svg('refresh',16)}</button></div><ul class="clean-list">${aiStatus}</ul>${ollamaAction}</div>` : ''}</section>`;
+  return `<section class="page-head"><div><h1>Профиль</h1><p>Ваше имя, пароль и выход из аккаунта.</p></div></section><section class="profile-grid"><div class="panel profile-card"><div class="avatar big role-${me.role}">${initials(me.name)}</div><h2>${esc(me.name)}</h2><p>${ROLES[me.role]}</p><label>Имя<input id="profile-name" value="${esc(me.name)}"></label><button class="btn light" id="save-profile">Сохранить имя</button><button class="btn danger" id="logout">${svg('logout',16)} Выйти</button></div><div class="panel admin-panel"><h3>Пароль</h3><div class="form-grid"><label>Текущий пароль<input id="pw-old" type="password" autocomplete="current-password"></label><label>Новый пароль<input id="pw-new" type="password" autocomplete="new-password" placeholder="минимум 6 символов"></label></div><button class="btn light" id="pw-save">Сменить пароль</button></div>${installCardHtml()}${isSmm() ? '' : `<div class="panel"><h3>Команда</h3><div class="team-list">${users.map(u=>`<div><span class="avatar role-${u.role}">${initials(u.name)}</span><b>${esc(u.name)}</b><em>${ROLES[u.role]}</em></div>`).join('')}</div></div>`}${telegramCardHtml()}${isSmm() ? `<div class="panel ai-control-card"><div class="panel-title-row"><h3>AI-разбор ТЗ</h3><button class="icon-action" id="refresh-ai" title="Проверить состояние">${svg('refresh',16)}</button></div><ul class="clean-list">${aiStatus}</ul>${ollamaAction}</div>` : ''}</section>`;
 }
 function bindProfile() {
   const link = $('#tg-link'); if (link) link.onclick = async () => {
@@ -663,6 +694,10 @@ function bindProfile() {
     } catch (e) { toast(e.message); }
   };
   const unlink = $('#tg-unlink'); if (unlink) unlink.onclick = async () => { try { await api('/api/telegram/unlink', 'POST', {}); await refresh(); render(); toast('Telegram отключён'); } catch (e) { toast(e.message); } };
+  const backup = $('#tg-backup'); if (backup) backup.onchange = async () => { try { me = { ...me, ...(await api('/api/me', 'PATCH', { backupToTelegram: backup.checked })) }; toast(backup.checked ? 'Копия будет приходить каждый вечер' : 'Ежедневная копия отключена'); } catch (e) { toast(e.message); } };
+  const backupNow = $('#tg-backup-now'); if (backupNow) backupNow.onclick = async () => { backupNow.disabled = true; try { await api('/api/telegram/backup', 'POST', {}); toast('Копия отправлена в Telegram ✓'); } catch (e) { toast(e.message); } backupNow.disabled = false; };
+  $('#pw-save').onclick = () => changePassword($('#pw-old').value, $('#pw-new').value).then(ok => { if (ok) { $('#pw-old').value = ''; $('#pw-new').value = ''; } });
+  const install = $('#install-app'); if (install) install.onclick = installApp;
   $('#save-profile').onclick=async()=>{try{const r=await api('/api/me','PATCH',{name:$('#profile-name').value});me={...me,...r};await refresh();render();toast('Сохранено')}catch(e){toast(e.message)}};
   $('#logout').onclick=async()=>{try{await api('/api/logout','POST',{})}catch(e){} setToken(''); me=null; renderAuth();};
   const refreshAi = $('#refresh-ai'); if (refreshAi) refreshAi.onclick = async () => { try { me = { ...me, ...(await api('/api/ai/status')) }; render(); toast('Статус AI обновлён'); } catch(e) { toast(e.message); } };
@@ -674,8 +709,149 @@ function bindProfile() {
   };
 }
 
+// --- Passwords: own change, first sign-in with a temporary password, reset by a manager.
+async function changePassword(oldPassword, newPassword) {
+  if (String(newPassword || '').length < 6) { toast('Новый пароль — минимум 6 символов'); return false; }
+  try { me = { ...me, ...(await api('/api/me', 'PATCH', { oldPassword, newPassword })) }; toast('Пароль изменён ✓ На других устройствах нужно будет войти заново', 4500); return true; }
+  catch (e) { toast(e.message); return false; }
+}
+function askNewPassword() {
+  if (!me || !me.mustChangePassword) return;
+  modal(`<h2>Задайте свой пароль</h2><p class="muted">Вы вошли с временным паролем от SMM-менеджера. Придумайте свой — его будете знать только вы.</p><div class="form-grid"><label>Временный пароль<input id="np-old" type="password" autocomplete="current-password"></label><label>Новый пароль<input id="np-new" type="password" autocomplete="new-password" placeholder="минимум 6 символов"></label></div><button class="btn primary" id="np-save">Сохранить пароль</button>`);
+  const x = $('#modal-x'); if (x) x.hidden = true;
+  $('.modal-back').onclick = null;
+  $('#np-save').onclick = async () => { if (await changePassword($('#np-old').value, $('#np-new').value)) closeModal(); };
+}
+function openResetPasswordModal(userId) {
+  const u = users.find(x => x.id === userId); if (!u) return;
+  const abc = 'abcdefghjkmnpqrstuvwxyz23456789';
+  const suggestion = [...crypto.getRandomValues(new Uint8Array(8))].map(b => abc[b % abc.length]).join('');
+  modal(`<h2>Временный пароль</h2><p class="muted">${esc(u.name)} (@${esc(u.login)}) войдёт с этим паролем и сразу задаст свой. Все текущие сеансы сотрудника будут закрыты.</p><div class="form-grid"><label>Временный пароль<input id="reset-pw" type="text" autocomplete="off" value="${suggestion}"></label></div><button class="btn primary" id="reset-save">Задать пароль</button>`);
+  $('#reset-save').onclick = async () => {
+    const pw = $('#reset-pw').value.trim();
+    if (pw.length < 6) return toast('Минимум 6 символов');
+    try { await api('/api/admin/users/' + userId, 'PATCH', { password: pw }); closeModal(); toast('Готово. Передайте сотруднику пароль: ' + pw, 9000); }
+    catch (e) { toast(e.message); }
+  };
+}
+
+// --- Team report for a period (Команда page).
+const REPORT_PERIODS = [['month', 'Этот месяц'], ['prev', 'Прошлый месяц'], ['7', '7 дней'], ['30', '30 дней']];
+const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function reportRange(period) {
+  const now = new Date();
+  if (period === 'prev') return [ymd(new Date(now.getFullYear(), now.getMonth() - 1, 1)), ymd(new Date(now.getFullYear(), now.getMonth(), 0))];
+  if (period === '7' || period === '30') { const a = new Date(now); a.setDate(a.getDate() - (+period - 1)); return [ymd(a), ymd(now)]; }
+  return [ymd(new Date(now.getFullYear(), now.getMonth(), 1)), ymd(now)];
+}
+async function loadReport() {
+  const [from, to] = reportRange(reportPeriod);
+  try { adminReport = await api(`/api/admin/report?from=${from}&to=${to}`); } catch (e) { toast(e.message); }
+  if (page === 'admin') render();
+}
+function reportHtml() {
+  const r = adminReport;
+  const pct = (a, b) => b ? Math.round(a / b * 100) + '%' : '—';
+  const head = `<div class="panel-title-row"><h3>Отчёт по команде</h3><button class="btn light small" id="report-csv" ${r ? '' : 'disabled'}>${svg('download', 14)} Excel</button></div><div class="chips report-periods">${REPORT_PERIODS.map(([k, l]) => `<button class="chip ${reportPeriod === k ? 'on' : ''}" data-report="${k}">${l}</button>`).join('')}</div>`;
+  if (!r) return `<article class="panel admin-panel report-panel">${head}<p class="muted"><span class="spin dark"></span> Считаем…</p></article>`;
+  const t = r.totals;
+  return `<article class="panel admin-panel report-panel">${head}
+    <div class="report-kpis"><div><b>${t.created}</b><span>поставлено ТЗ</span></div><div><b>${t.completed}</b><span>принято работ</span></div><div><b>${pct(t.onTime, t.onTime + t.late)}</b><span>сдано в срок</span></div><div><b>${t.revisions}</b><span>возвратов на правки</span></div></div>
+    <div class="report-scroll"><table class="report-table"><thead><tr><th>Сотрудник</th><th>Принято</th><th>В срок</th><th>С опозданием</th><th>Правки</th><th>Файлов</th><th>Сейчас в работе</th></tr></thead><tbody>${r.people.map(p => `<tr><td><b>${esc(p.name)}</b><small>${ROLES[p.role] || ''}</small></td><td>${p.completed}</td><td>${p.onTime}</td><td class="${p.late ? 'danger-txt' : ''}">${p.late}</td><td>${p.revisions}</td><td>${p.files}</td><td>${p.active}${p.overdue ? ` <em class="danger-txt">· ${p.overdue} просроч.</em>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="muted">Исполнителей пока нет</td></tr>'}</tbody></table></div>
+    <p class="muted micro-copy">«В срок» — работа принята до дедлайна. «Правки» — сколько раз работу вернули на доработку.</p></article>`;
+}
+function bindReport() {
+  $$('[data-report]').forEach(b => b.onclick = () => { reportPeriod = b.dataset.report; adminReport = null; render(); loadReport(); });
+  const csv = $('#report-csv'); if (csv) csv.onclick = () => {
+    const r = adminReport; if (!r) return;
+    const [from, to] = reportRange(reportPeriod);
+    downloadCsv(`turontz-otchet-${from}_${to}.csv`, [['Сотрудник', 'Роль', 'Принято', 'В срок', 'С опозданием', 'Правки', 'Файлов', 'В работе сейчас', 'Просрочено сейчас'],
+      ...r.people.map(p => [p.name, ROLES[p.role] || p.role, p.completed, p.onTime, p.late, p.revisions, p.files, p.active, p.overdue])]);
+  };
+}
+// Excel in the Russian locale reads ";" columns and needs a BOM for UTF-8.
+// A cell starting with = + - @ would run as a formula, so it gets a leading apostrophe.
+function downloadCsv(name, rows) {
+  const cell = v => { let s = String(v ?? ''); if (/^[=+\-@]/.test(s)) s = "'" + s; return /[";\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const blob = new Blob(['﻿' + rows.map(r => r.map(cell).join(';')).join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+
+// --- Recurring tasks.
+const WEEKDAYS = [[1, 'Пн'], [2, 'Вт'], [3, 'Ср'], [4, 'Чт'], [5, 'Пт'], [6, 'Сб'], [7, 'Вс']];
+function recurringHtml() {
+  const list = recurringRules || [];
+  const row = r => `<div class="recurring-row ${r.active ? '' : 'inactive'}"><span><b>${esc(r.title)}</b><small>${esc(r.scheduleText)}${r.deadlineHours ? ' · дедлайн через ' + r.deadlineHours + ' ч' : ''} · ${esc(projectById(r.projectId).name)}${r.active ? (r.nextRunAt ? ' · следующее: ' + fmtDateFull(r.nextRunAt) : '') : ' · на паузе'}</small></span><div class="team-actions"><button class="btn light small" data-rec-toggle="${r.id}">${r.active ? 'Пауза' : 'Включить'}</button><button class="btn light small danger" data-rec-del="${r.id}">✕</button></div></div>`;
+  return `<article class="panel admin-panel"><h3>Повторяющиеся ТЗ</h3>${list.length ? `<div class="recurring-list">${list.map(row).join('')}</div>` : '<p class="muted">Пока нет. Откройте любое ТЗ и нажмите «Повторять» — например, для еженедельного поста.</p>'}</article>`;
+}
+function bindRecurring() {
+  const reload = async msg => { recurringRules = await api('/api/recurring'); render(); toast(msg); };
+  $$('[data-rec-toggle]').forEach(b => b.onclick = async () => {
+    const r = (recurringRules || []).find(x => x.id === b.dataset.recToggle); if (!r) return;
+    try { await api('/api/recurring/' + r.id, 'PATCH', { active: !r.active }); await reload(r.active ? 'Повтор на паузе' : 'Повтор включён'); } catch (e) { toast(e.message); }
+  });
+  $$('[data-rec-del]').forEach(b => b.onclick = async () => {
+    if (b.dataset.ok !== '1') { b.dataset.ok = '1'; b.textContent = 'Удалить?'; return; }
+    try { await api('/api/recurring/' + b.dataset.recDel, 'DELETE'); await reload('Повтор удалён'); } catch (e) { toast(e.message); }
+  });
+}
+async function openRecurringModal(taskId) {
+  const t = tasks.find(x => x.id === taskId); if (!t) return;
+  let existing = null;
+  try { recurringRules = await api('/api/recurring'); existing = recurringRules.find(r => r.sourceTaskId === taskId) || null; } catch (e) {}
+  const days = new Set(existing ? existing.schedule.days : [1]);
+  modal(`<h2>Повторять ТЗ</h2><p class="muted">Копия «${esc(t.title)}» будет создаваться сама и уходить тем же исполнителям. Время — ташкентское.</p>
+    <div class="section-label">Дни недели</div><div class="chips rec-days">${WEEKDAYS.map(([d, l]) => `<button class="chip ${days.has(d) ? 'on' : ''}" data-day="${d}">${l}</button>`).join('')}</div>
+    <div class="form-grid"><label>Время создания<input id="rec-time" type="time" value="${esc(existing ? existing.schedule.time : '10:00')}"></label><label>Дедлайн через, часов<input id="rec-deadline" type="number" min="1" max="720" value="${existing ? (existing.deadlineHours ?? '') : 48}" placeholder="без дедлайна"></label></div>
+    <div class="drawer-tools"><button class="btn primary" id="rec-save">${existing ? 'Сохранить' : 'Включить повтор'}</button>${existing ? '<button class="btn light danger" id="rec-remove">Не повторять</button>' : ''}</div>`);
+  $$('.rec-days .chip').forEach(b => b.onclick = () => b.classList.toggle('on'));
+  $('#rec-save').onclick = async () => {
+    const body = { days: $$('.rec-days .chip.on').map(b => +b.dataset.day), time: $('#rec-time').value, deadlineHours: $('#rec-deadline').value === '' ? null : +$('#rec-deadline').value };
+    try {
+      const rule = existing ? await api('/api/recurring/' + existing.id, 'PATCH', { ...body, refreshTemplate: true }) : await api('/api/recurring', 'POST', { ...body, taskId });
+      closeModal(); recurringRules = null; toast('Повтор: ' + rule.scheduleText, 4000);
+    } catch (e) { toast(e.message); }
+  };
+  const rm = $('#rec-remove'); if (rm) rm.onclick = async () => { try { await api('/api/recurring/' + existing.id, 'DELETE'); closeModal(); recurringRules = null; toast('Повтор отключён'); } catch (e) { toast(e.message); } };
+}
+
+// --- Content plan: publications for a period as Excel (CSV) or a printable page (PDF via print).
+function openPlanExport() {
+  const y = calCursor.getFullYear(), m = calCursor.getMonth(), cp = currentProject();
+  modal(`<h2>Контент-план</h2><p class="muted">Публикации ${cp ? 'проекта «' + esc(cp.name) + '»' : 'всех проектов'} за период — для Excel или печати в PDF.</p><div class="form-grid"><label>С<input id="plan-from" type="date" value="${ymd(new Date(y, m, 1))}"></label><label>По<input id="plan-to" type="date" value="${ymd(new Date(y, m + 1, 0))}"></label></div><div class="drawer-tools"><button class="btn primary" id="plan-csv">${svg('download', 16)} Excel</button><button class="btn light" id="plan-print">Печать / PDF</button></div>`);
+  const rows = () => {
+    const from = new Date($('#plan-from').value + 'T00:00'), to = new Date($('#plan-to').value + 'T23:59:59');
+    return projectTasks().filter(t => t.publishDate && t.status !== 'archived' && new Date(t.publishDate) >= from && new Date(t.publishDate) <= to).sort((a, b) => new Date(a.publishDate) - new Date(b.publishDate));
+  };
+  const columns = ['Дата', 'Время', 'Проект', 'Платформа', 'Формат', 'Тема', 'Исполнители', 'Статус', 'Дедлайн'];
+  const line = t => [new Date(t.publishDate).toLocaleDateString('ru-RU', { weekday: 'short', day: 'numeric', month: 'long' }), fmtTime(t.publishDate), projectById(t.projectId).name, t.platform, t.format, t.title,
+    (t.assigneeIds || []).length ? t.assigneeIds.map(id => userById(id).name).join(', ') : (t.roles || []).map(r => ROLES[r]).join(', '), STATUS[t.status] || t.status, t.deadline ? fmtDate(t.deadline) + ', ' + fmtTime(t.deadline) : ''];
+  const period = () => `${$('#plan-from').value}_${$('#plan-to').value}`;
+  $('#plan-csv').onclick = () => { const list = rows(); if (!list.length) return toast('В этом периоде нет публикаций'); downloadCsv(`kontent-plan-${period()}.csv`, [columns, ...list.map(line)]); };
+  $('#plan-print').onclick = () => {
+    const list = rows(); if (!list.length) return toast('В этом периоде нет публикаций');
+    const w = window.open('', '_blank'); if (!w) return toast('Разрешите всплывающие окна для печати');
+    w.document.write(`<!doctype html><html lang="ru"><head><meta charset="utf-8"><title>Контент-план ${esc(period())}</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin:0 0 4px}p{color:#555;margin:0 0 16px}table{border-collapse:collapse;width:100%;font-size:12px}th,td{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}th{background:#f2f4f8}</style></head><body><h1>Контент-план${cp ? ' · ' + esc(cp.name) : ''}</h1><p>${esc($('#plan-from').value)} — ${esc($('#plan-to').value)} · ${list.length} публикаций</p><table><thead><tr>${columns.map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${list.map(t => `<tr>${line(t).map(c => `<td>${esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></body></html>`);
+    w.document.close(); w.focus(); w.print();
+  };
+}
+
+// --- Installable app (PWA): icon on the home screen, opens without the browser bar.
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installPrompt = e; if (me && page === 'profile') render(); });
+if ('serviceWorker' in navigator) window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+function installCardHtml() {
+  if (window.matchMedia('(display-mode: standalone)').matches || navigator.standalone) return '';
+  const body = installPrompt ? `<button class="btn primary" id="install-app">${svg('download', 16)} Установить</button>`
+    : /iphone|ipad|ipod/i.test(navigator.userAgent) ? '<p class="muted">В Safari нажмите «Поделиться» → «На экран „Домой“».</p>'
+    : '<p class="muted">В Chrome откройте меню ⋮ → «Установить приложение» или «Добавить на главный экран».</p>';
+  return `<div class="panel tg-card"><h3>Приложение на телефоне</h3><p class="muted">Turon TZ можно установить как приложение: иконка на главном экране, открывается без адресной строки.</p>${body}</div>`;
+}
+async function installApp() { if (!installPrompt) return; installPrompt.prompt(); try { await installPrompt.userChoice; } catch (e) {} installPrompt = null; render(); }
+
 function modal(html) { $('#modal-root').innerHTML = `<div class="modal-back"><div class="modal"><button class="modal-x" id="modal-x">×</button>${html}</div></div>`; $('#modal-root').hidden=false; $('#modal-x').onclick=closeModal; $('.modal-back').onclick=e=>{if(e.target.classList.contains('modal-back'))closeModal()}; }
 function closeModal(){ $('#modal-root').hidden=true; $('#modal-root').innerHTML=''; }
 
-setInterval(async()=>{ if(!me || document.hidden) return; try{ await refresh(); if(['dashboard','board','calendar','notifications'].includes(page) && !$('.modal-back') && !(page==='board' && document.activeElement && document.activeElement.id==='filter-q')) render(); }catch(e){} }, 15000);
-(async function boot(){ if(token){ try{ me = await api('/api/me'); await refresh(); openTaskFromLink(); render(); return; }catch(e){} } renderAuth(); })();
+setInterval(async()=>{ if(!me || document.hidden || uploading) return; try{ await refresh(); if(['dashboard','board','calendar','notifications'].includes(page) && !$('.modal-back') && !(page==='board' && document.activeElement && document.activeElement.id==='filter-q')) render(); }catch(e){} }, 15000);
+(async function boot(){ if(token){ try{ me = await api('/api/me'); await refresh(); openTaskFromLink(); render(); askNewPassword(); return; }catch(e){} } renderAuth(); })();

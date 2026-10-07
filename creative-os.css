@@ -161,3 +161,31 @@ body:not(.auth-body) .brand-context b,body:not(.auth-body) .brand-context h3{col
 .ops-main .admin-grid{grid-template-columns:minmax(0,1.25fr) minmax(0,.75fr)}
 .ops-main .admin-team-row{grid-template-columns:auto minmax(0,1fr) minmax(110px,140px) auto}
 @media(max-width:1180px){.ops-main .admin-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* small button groups: team rows, recurring rows, drawer, modals */
+.team-actions,.drawer-tools{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.drawer-tools{margin:4px 0 12px}
+.switch-row{display:flex;flex-direction:row;align-items:center;gap:8px;margin:0;padding:0;border:0;text-transform:none;font-size:13px;font-weight:600;color:#c9d8ea;letter-spacing:0}
+.switch-row input{width:auto;margin:0}
+
+/* team report */
+.report-panel{grid-column:1 / -1}
+.report-periods{margin:10px 0 14px}
+.report-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-bottom:14px}
+.report-kpis div{background:#0e1d31;border:1px solid #243d5b;border-radius:12px;padding:12px;display:grid;gap:3px}
+.report-kpis b{font-size:24px;color:#f3f8ff}
+.report-kpis span{font-size:11px;color:#8da1bd}
+.report-scroll{overflow-x:auto}
+.report-table{width:100%;border-collapse:collapse;font-size:13px;min-width:560px}
+.report-table th{text-align:left;font-size:11px;color:#8da1bd;font-weight:700;padding:8px 10px;border-bottom:1px solid #243d5b;white-space:nowrap}
+.report-table td{padding:9px 10px;border-bottom:1px solid #1a2d46;color:#dbe7f5}
+.report-table td small{display:block;color:#7f94b0;font-size:11px}
+.report-table em{font-style:normal}
+
+/* recurring tasks */
+.recurring-list{display:grid;gap:8px}
+.recurring-row{display:flex;align-items:center;justify-content:space-between;gap:10px;background:#0e1d31;border:1px solid #243d5b;border-radius:12px;padding:10px}
+.recurring-row span{display:grid;gap:3px;min-width:0}
+.recurring-row small{color:#8da1bd;font-size:11px;line-height:1.35}
+.recurring-row.inactive{opacity:.6}
+@media(max-width:700px){.report-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.recurring-row{flex-direction:column;align-items:flex-start}}
