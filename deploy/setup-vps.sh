@@ -2,6 +2,7 @@
 # Turon TZ — one-time setup of a fresh Ubuntu 22.04/24.04 VPS.
 # Run as root:  bash setup-vps.sh turontz.space
 # Installs Node.js 22, Caddy (automatic HTTPS), a systemd service and the firewall.
+# The app itself is uploaded afterwards with deploy/deploy.sh.
 set -euo pipefail
 DOMAIN="${1:-turontz.space}"
 APP_DIR=/opt/turontz
@@ -53,7 +54,7 @@ cat > /etc/caddy/Caddyfile <<EOF
 $DOMAIN {
   encode gzip
   request_body {
-    max_size 15MB
+    max_size 320MB
   }
   reverse_proxy 127.0.0.1:3457
 }
